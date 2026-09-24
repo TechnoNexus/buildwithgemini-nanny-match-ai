@@ -405,7 +405,7 @@ function buildNode(id, comps, seen) {
       return el("hr", "a2divider");
     case "Image": {
       const src = boundStr(props.url || props.src);
-      if (!/^https?:\/\//i.test(src)) return null;
+      if (!/^(?:https?:\/\/|\/)/i.test(src)) return null;
       const img = el("img", "a2img"); img.src = src; img.alt = boundStr(props.alt) || ""; return img;
     }
     case "Icon": {

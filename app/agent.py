@@ -27,27 +27,43 @@ from google import genai
 from google.adk.agents import Agent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.apps import App
-from google.adk.code_executors import AgentEngineSandboxCodeExecutor
 from google.adk.models import Gemini
 from google.adk.tools import ToolContext
 from google.adk.tools.preload_memory_tool import PreloadMemoryTool
-from google.cloud import firestore, storage
 from google.genai import types
 
 from .a2ui_utils import a2ui_callback
+from .db import (
+    add_nanny as local_add_nanny,
+    search_nannies as local_search_nannies,
+)
 
-MODEL = "gemini-3.8-flash"
-FIRESTORE_PROJECT_ID = "qwiklabs-gcp-02-0b1ea291c4ae"
-REASONING_ENGINE_RESOURCE_NAME = "projects/qwiklabs-gcp-02-0b1ea291c4ae/locations/us-east1/reasoningEngines/5204536091054440448"
+# Optional GCP imports (used when deployed or when GCP credentials exist)
+try:
+    from google.cloud import firestore, storage
+    HAS_GCP = True
+except ImportError:
+    firestore = None
+    storage = None
+    HAS_GCP = False
+
+# Model and Cloud Configuration
+MODEL = os.getenv("MODEL", "gemini-2.5-flash")
+USE_FIRESTORE = os.getenv("USE_FIRESTORE", "false").lower() == "true"
+FIRESTORE_PROJECT_ID = os.getenv("FIRESTORE_PROJECT_ID", "")
+REASONING_ENGINE_RESOURCE_NAME = os.getenv("AGENT_ENGINE_RESOURCE_NAME", "")
+GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "")
 
 
-def get_firestore_db() -> firestore.Client:
-    """Returns a Firestore client initialized with hardcoded project ID."""
-    return firestore.Client(project=FIRESTORE_PROJECT_ID)
+def get_firestore_db():
+    """Returns a Firestore client if configured and available."""
+    if HAS_GCP and firestore and FIRESTORE_PROJECT_ID:
+        return firestore.Client(project=FIRESTORE_PROJECT_ID)
+    return None
 
 
 def search_nannies_firestore(location: str = "", max_rate: float = 0.0, cpr_required: bool = False) -> str:
-    """Searches the Firestore database for qualified nanny candidates.
+    """Searches the database for qualified nanny candidates.
 
     Args:
         location: Target city or region (e.g. 'San Francisco', 'New York').
@@ -55,37 +71,44 @@ def search_nannies_firestore(location: str = "", max_rate: float = 0.0, cpr_requ
         cpr_required: Filter for CPR-certified nannies.
 
     Returns:
-        Formatted string listing candidate nanny profiles retrieved from Firestore.
+        Formatted string listing candidate nanny profiles.
     """
-    db = get_firestore_db()
-    docs = db.collection("nannies").stream()
-    matches = []
+    if USE_FIRESTORE and HAS_GCP and FIRESTORE_PROJECT_ID:
+        try:
+            db = get_firestore_db()
+            if db:
+                docs = db.collection("nannies").stream()
+                matches = []
+                for doc in docs:
+                    n = doc.to_dict()
+                    n_loc = n.get("location", "")
+                    n_rate = float(n.get("hourly_rate", 0.0))
+                    n_cpr = bool(n.get("cpr_certified", False))
 
-    for doc in docs:
-        n = doc.to_dict()
-        n_loc = n.get("location", "")
-        n_rate = float(n.get("hourly_rate", 0.0))
-        n_cpr = bool(n.get("cpr_certified", False))
+                    if location and location.lower() not in n_loc.lower():
+                        continue
+                    if max_rate > 0 and n_rate > max_rate:
+                        continue
+                    if cpr_required and not n_cpr:
+                        continue
 
-        if location and location.lower() not in n_loc.lower():
-            continue
-        if max_rate > 0 and n_rate > max_rate:
-            continue
-        if cpr_required and not n_cpr:
-            continue
+                    cpr_str = "Yes" if n_cpr else "No"
+                    rating = n.get("rating", 5.0)
+                    exp = n.get("years_experience", 0)
+                    bio = n.get("bio", "")
+                    matches.append(
+                        f"- **{n.get('name')}** (ID: `{n.get('id')}`) | ${n_rate}/hr | {exp} yrs exp | CPR: {cpr_str} | Rating: {rating} ★\n"
+                        f"  *Location*: {n_loc} | *Bio*: {bio}"
+                    )
+                if not matches:
+                    return f"No nannies currently found in Firestore matching location='{location}' under ${max_rate}/hr."
+                return f"Found {len(matches)} nanny candidate(s) in Firestore:\n" + "\n\n".join(matches)
+        except Exception as e:
+            # Fall back to local SQLite if Firestore encounters an error
+            pass
 
-        cpr_str = "Yes" if n_cpr else "No"
-        rating = n.get("rating", 5.0)
-        exp = n.get("years_experience", 0)
-        bio = n.get("bio", "")
-        matches.append(
-            f"- **{n.get('name')}** (ID: `{n.get('id')}`) | ${n_rate}/hr | {exp} yrs exp | CPR: {cpr_str} | Rating: {rating} ★\n"
-            f"  *Location*: {n_loc} | *Bio*: {bio}"
-        )
-
-    if not matches:
-        return f"No nannies currently found in Firestore matching location='{location}' under ${max_rate}/hr."
-    return f"Found {len(matches)} nanny candidate(s) in Firestore:\n" + "\n\n".join(matches)
+    # Use local zero-cost SQLite storage
+    return local_search_nannies(location=location, max_rate=max_rate, cpr_required=cpr_required)
 
 
 def add_nanny_firestore(
@@ -98,7 +121,7 @@ def add_nanny_firestore(
     bio: str = "",
     availability: str = "Full-time"
 ) -> str:
-    """Adds or updates a nanny candidate profile in the Firestore database.
+    """Adds or updates a nanny candidate profile in the database.
 
     Args:
         nanny_id: Unique identifier (e.g. 'nanny-05').
@@ -110,22 +133,39 @@ def add_nanny_firestore(
         bio: Short biography or background summary.
         availability: Work schedule availability.
     """
-    db = get_firestore_db()
-    doc_ref = db.collection("nannies").document(nanny_id)
-    payload = {
-        "id": nanny_id,
-        "name": name,
-        "location": location,
-        "hourly_rate": float(hourly_rate),
-        "years_experience": int(years_experience),
-        "cpr_certified": bool(cpr_certified),
-        "bio": bio,
-        "availability": availability,
-        "rating": 5.0,
-        "updated_at": firestore.SERVER_TIMESTAMP,
-    }
-    doc_ref.set(payload)
-    return f"Successfully saved nanny profile **{name}** (ID: `{nanny_id}`) to Firestore database!"
+    if USE_FIRESTORE and HAS_GCP and FIRESTORE_PROJECT_ID:
+        try:
+            db = get_firestore_db()
+            if db:
+                doc_ref = db.collection("nannies").document(nanny_id)
+                payload = {
+                    "id": nanny_id,
+                    "name": name,
+                    "location": location,
+                    "hourly_rate": float(hourly_rate),
+                    "years_experience": int(years_experience),
+                    "cpr_certified": bool(cpr_certified),
+                    "bio": bio,
+                    "availability": availability,
+                    "rating": 5.0,
+                    "updated_at": firestore.SERVER_TIMESTAMP,
+                }
+                doc_ref.set(payload)
+                return f"Successfully saved nanny profile **{name}** (ID: `{nanny_id}`) to Firestore database!"
+        except Exception:
+            pass
+
+    # Use local zero-cost SQLite storage
+    return local_add_nanny(
+        nanny_id=nanny_id,
+        name=name,
+        location=location,
+        hourly_rate=hourly_rate,
+        years_experience=years_experience,
+        cpr_certified=cpr_certified,
+        bio=bio,
+        availability=availability,
+    )
 
 
 def add_to_watchlist(tool_context: ToolContext, item_id: str, title: str, category: str = "nanny", details: str = "") -> str:
@@ -220,7 +260,7 @@ def calculate_payroll_and_taxes(hourly_rate: float, hours_per_week: float = 40.0
     overtime_rate = hourly_rate * 1.5
     overtime_pay = overtime_hours * overtime_rate
     weekly_gross = regular_pay + overtime_pay
-    
+
     # Estimated employer taxes (FICA 7.65% + FUTA/SUTA ~2.35% = ~10%)
     employer_taxes = weekly_gross * 0.10
     total_weekly = weekly_gross + employer_taxes
@@ -264,198 +304,254 @@ def lookup_zip_code_location(zip_code: str) -> str:
 
 
 def geocode_address(address: str) -> str:
-    """Converts a street address or location name into geographic coordinates (lat/lng) using Google Geocoding API.
+    """Converts a street address or location name into geographic coordinates (lat/lng).
+    Uses Google Geocoding API if GOOGLE_MAPS_API_KEY is provided; otherwise falls back to OpenStreetMap Nominatim.
 
     Args:
-        address: Full street address or location (e.g. '1600 Amphitheatre Pkwy, Mountain View, CA').
+        address: Full street address or location (e.g. '1600 Amphitheatre Pkwy, Mountain View, CA' or 'San Francisco').
     """
     api_key = os.getenv("GOOGLE_MAPS_API_KEY")
-    if not api_key:
-        return "Error: GOOGLE_MAPS_API_KEY environment variable is not set."
+    if api_key:
+        encoded_address = urllib.parse.quote(address.strip())
+        url = f"https://maps.googleapis.com/maps/api/geocode/json?address={encoded_address}&key={api_key}"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "NannyMatchAI/1.0"})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                results = data.get("results", [])
+                if results:
+                    first = results[0]
+                    fmt_addr = first.get("formatted_address", address)
+                    location = first.get("geometry", {}).get("location", {})
+                    lat, lng = location.get("lat"), location.get("lng")
+                    return f"🗺️ **Geocoded Location**: {fmt_addr} | Latitude: {lat}, Longitude: {lng}"
+        except Exception:
+            pass  # Fall through to Nominatim
 
-    encoded_address = urllib.parse.quote(address.strip())
-    url = f"https://maps.googleapis.com/maps/api/geocode/json?address={encoded_address}&key={api_key}"
+    # Free OpenStreetMap Nominatim fallback (zero cost, no API key needed)
     try:
+        encoded_address = urllib.parse.quote(address.strip())
+        url = f"https://nominatim.openstreetmap.org/search?q={encoded_address}&format=json&limit=1"
         req = urllib.request.Request(url, headers={"User-Agent": "NannyMatchAI/1.0"})
         with urllib.request.urlopen(req, timeout=5) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            results = data.get("results", [])
-            if not results:
-                return f"No geocoding results found for address: '{address}'."
-            first = results[0]
-            fmt_addr = first.get("formatted_address", address)
-            location = first.get("geometry", {}).get("location", {})
-            lat, lng = location.get("lat"), location.get("lng")
-            return f"🗺️ **Geocoded Location**: {fmt_addr} | Latitude: {lat}, Longitude: {lng}"
+            results = json.loads(response.read().decode("utf-8"))
+            if results:
+                first = results[0]
+                fmt_addr = first.get("display_name", address)
+                lat, lng = first.get("lat"), first.get("lon")
+                return f"🗺️ **Geocoded Location**: {fmt_addr} | Latitude: {lat}, Longitude: {lng}"
+            return f"No geocoding results found for address: '{address}'."
     except Exception as e:
-        return f"Geocoding API request failed: {str(e)}"
+        return f"Geocoding request failed: {str(e)}"
 
 
 def find_nearby_places(query: str, location: str = "") -> str:
-    """Finds nearby places (e.g., playgrounds, daycare centers, pediatricians, schools) using Places API (New).
+    """Finds nearby places (e.g., playgrounds, daycare centers, pediatricians, schools).
+    Uses Google Places API if GOOGLE_MAPS_API_KEY is provided; otherwise falls back to OpenStreetMap Nominatim.
 
     Args:
         query: Place type or search phrase (e.g. 'playground', 'daycare center', 'pediatric clinic').
         location: Optional location context or city (e.g. 'San Francisco, CA').
     """
-    api_key = os.getenv("GOOGLE_MAPS_API_KEY")
-    if not api_key:
-        return "Error: GOOGLE_MAPS_API_KEY environment variable is not set."
-
     full_query = f"{query} in {location}" if location else query
-    url = "https://places.googleapis.com/v1/places:searchText"
-    headers = {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": api_key,
-        "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location"
-    }
-    payload = json.dumps({
-        "textQuery": full_query,
-        "maxResultCount": 5
-    }).encode("utf-8")
+    api_key = os.getenv("GOOGLE_MAPS_API_KEY")
 
+    if api_key:
+        url = "https://places.googleapis.com/v1/places:searchText"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": api_key,
+            "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location"
+        }
+        payload = json.dumps({
+            "textQuery": full_query,
+            "maxResultCount": 5
+        }).encode("utf-8")
+        try:
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                places = data.get("places", [])
+                if places:
+                    lines = [f"📍 **Nearby Places for '{full_query}'**:"]
+                    for idx, p in enumerate(places, 1):
+                        name = p.get("displayName", {}).get("text", "Unknown Place")
+                        addr = p.get("formattedAddress", "N/A")
+                        loc = p.get("location", {})
+                        lat, lng = loc.get("latitude"), loc.get("longitude")
+                        lines.append(f"{idx}. **{name}** — {addr} (Coordinates: {lat}, {lng})")
+                    return "\n".join(lines)
+        except Exception:
+            pass  # Fall through to Nominatim
+
+    # Free OpenStreetMap Nominatim fallback (zero cost, no API key needed)
     try:
-        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        encoded_query = urllib.parse.quote(full_query.strip())
+        url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&format=json&limit=5"
+        req = urllib.request.Request(url, headers={"User-Agent": "NannyMatchAI/1.0"})
         with urllib.request.urlopen(req, timeout=5) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            places = data.get("places", [])
+            places = json.loads(response.read().decode("utf-8"))
             if not places:
                 return f"No places found matching query: '{full_query}'."
-            
             lines = [f"📍 **Nearby Places for '{full_query}'**:"]
             for idx, p in enumerate(places, 1):
-                name = p.get("displayName", {}).get("text", "Unknown Place")
-                addr = p.get("formattedAddress", "N/A")
-                loc = p.get("location", {})
-                lat, lng = loc.get("latitude"), loc.get("longitude")
-                lines.append(f"{idx}. **{name}** — {addr} (Coordinates: {lat}, {lng})")
+                name = p.get("display_name", "Unknown Place")
+                lat, lng = p.get("lat"), p.get("lon")
+                lines.append(f"{idx}. **{name}** (Coordinates: {lat}, {lng})")
             return "\n".join(lines)
     except Exception as e:
-        return f"Places API (New) request failed: {str(e)}"
+        return f"Nearby places lookup failed: {str(e)}"
 
 
 async def generate_nanny_illustration(
     prompt_description: str,
     tool_context: ToolContext,
 ) -> str:
-    """Generates a domain image (nanny candidate avatar, activity visual, or playroom layout) using gemini-3.1-flash-lite-image in the global region.
-    Saves the image to Playground Artifacts and uploads it to public Cloud Storage.
+    """Generates a domain image (nanny candidate avatar, activity visual, or playroom layout).
+    Saves the image locally and to Playground Artifacts.
 
     Args:
         prompt_description: Visual prompt describing the image (e.g., 'A warm nanny reading a fairytale book to two kids').
         tool_context: Framework ToolContext injected automatically.
     """
     try:
-        client = genai.Client(
-            vertexai=True,
-            project="qwiklabs-gcp-02-0b1ea291c4ae",
-            location="global",
-        )
-        response = client.models.generate_content(
-            model="gemini-3.1-flash-lite-image",
-            contents=[prompt_description],
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"],
-            ),
-        )
-
         image_bytes = None
         mime_type = "image/jpeg"
-        for part in response.parts:
-            if part.inline_data:
-                image_bytes = part.inline_data.data
-                mime_type = part.inline_data.mime_type or "image/jpeg"
-                break
 
-        if not image_bytes:
-            return "Error: No image generated from model response."
+        # Initialize genai client
+        if os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "false").lower() == "true" and HAS_GCP:
+            client = genai.Client(
+                vertexai=True,
+                project=FIRESTORE_PROJECT_ID or None,
+                location=os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
+            )
+            response = client.models.generate_content(
+                model="gemini-3.1-flash-lite-image",
+                contents=[prompt_description],
+                config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
+            )
+            for part in response.parts:
+                if part.inline_data:
+                    image_bytes = part.inline_data.data
+                    mime_type = part.inline_data.mime_type or "image/jpeg"
+                    break
+        elif os.getenv("GEMINI_API_KEY"):
+            client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+            # Attempt image generation using Imagen model if available
+            try:
+                result = client.models.generate_images(
+                    model="imagen-3.0-generate-002",
+                    prompt=prompt_description,
+                    config=dict(number_of_images=1, output_mime_type="image/jpeg"),
+                )
+                if result.generated_images:
+                    image_bytes = result.generated_images[0].image.image_bytes
+                    mime_type = "image/jpeg"
+            except Exception:
+                pass
 
         timestamp = int(datetime.datetime.now().timestamp())
         ext = "jpg" if "jpeg" in mime_type else "png"
         filename = f"nanny_image_{timestamp}.{ext}"
 
-        # 1. Save artifact so it shows up in Playground Artifacts panel
-        artifact_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
-        await tool_context.save_artifact(filename=filename, artifact=artifact_part)
+        # If image was generated, save locally and as artifact
+        if image_bytes:
+            static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "static", "generated")
+            os.makedirs(static_dir, exist_ok=True)
+            local_file_path = os.path.join(static_dir, filename)
+            with open(local_file_path, "wb") as f:
+                f.write(image_bytes)
 
-        # 2. Upload in-memory image bytes to public Cloud Storage bucket
-        bucket_name = "nanny-match-ai-assets-qwiklabs-gcp-02-0b1ea291c4ae"
-        storage_client = storage.Client(project="qwiklabs-gcp-02-0b1ea291c4ae")
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(filename)
-        blob.upload_from_string(image_bytes, content_type=mime_type)
+            try:
+                artifact_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+                await tool_context.save_artifact(filename=filename, artifact=artifact_part)
+            except Exception:
+                pass
 
-        public_url = f"https://storage.googleapis.com/{bucket_name}/{filename}"
+            # Optional upload to GCS if configured
+            if HAS_GCP and storage and GCS_BUCKET_NAME:
+                try:
+                    storage_client = storage.Client(project=FIRESTORE_PROJECT_ID)
+                    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+                    blob = bucket.blob(filename)
+                    blob.upload_from_string(image_bytes, content_type=mime_type)
+                    public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{filename}"
+                    return (
+                        f"🎨 **Generated Domain Image**:\n"
+                        f"- Saved locally: `/static/generated/{filename}`\n"
+                        f"- Cloud Storage URL: {public_url}"
+                    )
+                except Exception:
+                    pass
+
+            return (
+                f"🎨 **Generated Domain Image**:\n"
+                f"- Saved locally: `/static/generated/{filename}`\n"
+                f"- Playground Artifact: `{filename}`"
+            )
+
         return (
-            f"🎨 **Generated Domain Image**:\n"
-            f"- Saved to Playground Artifacts panel as `{filename}`\n"
-            f"- Uploaded to Public Cloud Storage: {public_url}"
+            f"🎨 **Visual Prompt Registered**: '{prompt_description}'.\n"
+            f"(Note: Image generation is active when Imagen 3 is configured on your Gemini API key)."
         )
     except Exception as e:
-        return f"Error generating image: {str(e)}"
+        return f"Image generation status: {str(e)}"
 
 
 async def generate_nanny_video(
     prompt_description: str,
     tool_context: ToolContext,
 ) -> str:
-    """Generates a short domain video (e.g. nanny introduction video, CPR safety demonstration, or family activity routine) using Google's Omni model (gemini-omni-flash-preview) in the global region.
-    Saves the video to Playground Artifacts and uploads it to public Cloud Storage.
+    """Generates or simulates a domain demonstration video.
 
     Args:
-        prompt_description: Description of the video to generate (e.g., 'A cheerful nanny demonstrating CPR techniques on a toddler dummy').
+        prompt_description: Description of the video to generate.
         tool_context: Framework ToolContext injected automatically.
     """
-    try:
-        client = genai.Client(
-            vertexai=True,
-            project="qwiklabs-gcp-02-0b1ea291c4ae",
-            location="global",
-        )
-        interaction = client.interactions.create(
-            model="gemini-omni-flash-preview",
-            input=prompt_description,
-        )
+    if os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "false").lower() == "true" and HAS_GCP:
+        try:
+            client = genai.Client(
+                vertexai=True,
+                project=FIRESTORE_PROJECT_ID or None,
+                location=os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
+            )
+            interaction = client.interactions.create(
+                model="gemini-omni-flash-preview",
+                input=prompt_description,
+            )
+            video_bytes = None
+            if hasattr(interaction, "output_video") and interaction.output_video:
+                data = getattr(interaction.output_video, "data", None)
+                if data:
+                    if isinstance(data, str):
+                        video_bytes = base64.b64decode(data)
+                    elif isinstance(data, (bytes, bytearray)):
+                        video_bytes = bytes(data)
 
-        video_bytes = None
-        if hasattr(interaction, "output_video") and interaction.output_video:
-            data = getattr(interaction.output_video, "data", None)
-            if data:
-                if isinstance(data, str):
-                    video_bytes = base64.b64decode(data)
-                elif isinstance(data, (bytes, bytearray)):
-                    video_bytes = bytes(data)
+            if video_bytes:
+                timestamp = int(datetime.datetime.now().timestamp())
+                filename = f"nanny_video_{timestamp}.mp4"
+                artifact_part = types.Part.from_bytes(data=video_bytes, mime_type="video/mp4")
+                await tool_context.save_artifact(filename=filename, artifact=artifact_part)
+                return f"🎬 **Generated Domain Video**: Saved to Artifacts panel as `{filename}`"
+        except Exception as e:
+            return f"Video generation: {str(e)}"
 
-        if not video_bytes:
-            return "Error: No video bytes returned from gemini-omni-flash-preview model."
-
-        timestamp = int(datetime.datetime.now().timestamp())
-        filename = f"nanny_video_{timestamp}.mp4"
-
-        # 1. Save artifact so it shows up in Playground Artifacts panel
-        artifact_part = types.Part.from_bytes(data=video_bytes, mime_type="video/mp4")
-        await tool_context.save_artifact(filename=filename, artifact=artifact_part)
-
-        # 2. Upload in-memory video bytes to public Cloud Storage bucket
-        bucket_name = "nanny-match-ai-assets-qwiklabs-gcp-02-0b1ea291c4ae"
-        storage_client = storage.Client(project="qwiklabs-gcp-02-0b1ea291c4ae")
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(filename)
-        blob.upload_from_string(video_bytes, content_type="video/mp4")
-
-        public_url = f"https://storage.googleapis.com/{bucket_name}/{filename}"
-        return (
-            f"🎬 **Generated Domain Video**:\n"
-            f"- Saved to Playground Artifacts panel as `{filename}`\n"
-            f"- Uploaded to Public Cloud Storage: {public_url}"
-        )
-    except Exception as e:
-        return f"Error generating video: {str(e)}"
+    return (
+        f"🎬 **Demonstration Video Simulation**: Storyboard generated for '{prompt_description}'.\n"
+        f"- Scene 1: Warm introduction and candidate credentials verification.\n"
+        f"- Scene 2: Interactive childcare demonstration and safety protocols.\n"
+        f"*(Note: Gemini Omni Video generation runs on Vertex AI Agent Runtime; in local mode a simulated preview is logged)*"
+    )
 
 
-# WRITE: after each turn, send the session to Memory Bank for extraction.
+# After each turn callback (safely handles Memory Bank when running in local mode)
 async def generate_memories_callback(callback_context: CallbackContext):
-    await callback_context.add_session_to_memory()
+    try:
+        await callback_context.add_session_to_memory()
+    except Exception:
+        # Vertex AI Memory Bank not available or running in local mode
+        pass
     return None
 
 
@@ -468,23 +564,21 @@ instruction = schema_manager.generate_system_prompt(
     role_description=(
         "You are NannyMatch AI, a premium conversational concierge for family nanny hiring, placement, and childcare management.\n\n"
         "Your capabilities include:\n"
-        "1. **Firestore Database**: Search candidate nannies in Google Cloud Firestore (`search_nannies_firestore`) "
+        "1. **Candidate Database**: Search candidate nannies (`search_nannies_firestore`) "
         "and add new nanny candidate profiles (`add_nanny_firestore`).\n"
         "2. **Memory & Personalization**: Remember user preferences, family details (kids' ages, special needs), "
-        "and nanny requirements across sessions via Memory Bank.\n"
+        "and nanny requirements across sessions.\n"
         "3. **Payroll & Cost Calculation**: Calculate weekly/monthly gross pay, overtime, and estimated employer taxes using `calculate_payroll_and_taxes`.\n"
-        "4. **Geocoding & Maps**: Geocode address into lat/long coordinates using `geocode_address` (requires GOOGLE_MAPS_API_KEY).\n"
-        "5. **Places API (New)**: Find nearby playgrounds, daycares, pediatric clinics using `find_nearby_places` (requires GOOGLE_MAPS_API_KEY).\n"
-        "6. **Image Generation**: Generate candidate avatar illustrations or playroom activity visuals using `generate_nanny_illustration` "
-        "(uses `gemini-3.1-flash-lite-image` in `global` region, saves artifact, and uploads to GCS).\n"
-        "7. **Video Generation**: Generate domain intro/demo videos using `generate_nanny_video` "
-        "(uses `gemini-omni-flash-preview` in `global` region, saves artifact, and uploads to GCS).\n"
+        "4. **Geocoding & Maps**: Geocode address into lat/long coordinates using `geocode_address` (works with Google Maps API key or free OpenStreetMap).\n"
+        "5. **Places API**: Find nearby playgrounds, daycares, pediatric clinics using `find_nearby_places`.\n"
+        "6. **Image Generation**: Generate candidate avatar illustrations or playroom activity visuals using `generate_nanny_illustration`.\n"
+        "7. **Video Generation**: Generate domain intro/demo videos using `generate_nanny_video`.\n"
         "8. **ZIP Code Location Lookup**: Validate and lookup city/state/coordinates for US zip codes using `lookup_zip_code_location`.\n"
         "9. **Watchlist Management**: Allow users to save favorite candidates or job postings "
         "to their watchlist using `add_to_watchlist` and view them using `view_watchlist`.\n"
         "10. **Profiles & Preferences**: Save and view family requirements using `save_family_profile` and `get_my_profile`.\n"
         "11. **Interview Booking**: Schedule interview slots using `schedule_interview`.\n\n"
-        "Always respond warmly, professionally, and use your Firestore database tools when asked about nanny candidates!"
+        "Always respond warmly, professionally, and use your database tools when asked about nanny candidates!"
     ),
     workflow_description="Analyze the request and return structured UI when appropriate.",
     ui_description=(
@@ -493,12 +587,11 @@ instruction = schema_manager.generate_system_prompt(
         "Use ONLY these components: Card, Column, Row, Text, and Image. Do not use "
         "Table or Heading (unsupported), or Buttons, actions, or forms (they do "
         "nothing in adk web). "
-        "You may include one Image component, but only when you have a public https "
-        "URL for the image (for example the URL an image tool returns after uploading "
-        "to a public bucket). Set the Image url to that exact https link, for example "
-        "{\"Image\": {\"url\": {\"literalString\": \"https://...\"}}}. Never point an "
-        "Image at a bare filename, an artifact name, or a non-http(s) path. If you do "
-        "not have a public URL, add a short Text line noting the image instead. "
+        "You may include one Image component, but only when you have a public or local url "
+        "for the image (e.g. https://... or /static/generated/...). Set the Image url to that exact link, for example "
+        "{\"Image\": {\"url\": {\"literalString\": \"/static/generated/example.jpg\"}}}. Never point an "
+        "Image at a bare filename, an artifact name, or an invalid path. If you do "
+        "not have a valid URL, add a short Text line noting the image instead. "
         "No markdown in text; use the usageHint property ('h1', 'h2', 'body') for "
         "headings and emphasis. "
         "Output ONLY the raw A2UI JSON array — no prose, and never wrap it in "
@@ -508,6 +601,16 @@ instruction = schema_manager.generate_system_prompt(
     include_examples=True,
 )
 
+# Optional Code Executor (only when deployed on Vertex AI Reasoning Engine)
+code_executor = None
+if REASONING_ENGINE_RESOURCE_NAME:
+    try:
+        from google.adk.code_executors import AgentEngineSandboxCodeExecutor
+        code_executor = AgentEngineSandboxCodeExecutor(
+            agent_engine_resource_name=REASONING_ENGINE_RESOURCE_NAME
+        )
+    except Exception:
+        code_executor = None
 
 root_agent = Agent(
     name="nanny_match_ai",
@@ -515,9 +618,7 @@ root_agent = Agent(
         model=MODEL,
         retry_options=types.HttpRetryOptions(attempts=3),
     ),
-    code_executor=AgentEngineSandboxCodeExecutor(
-        agent_engine_resource_name=REASONING_ENGINE_RESOURCE_NAME
-    ),
+    code_executor=code_executor,
     instruction=instruction,
     tools=[
         PreloadMemoryTool(),

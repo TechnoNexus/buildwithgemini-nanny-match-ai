@@ -70,33 +70,47 @@ The following capabilities are directly implemented in source code ([`app/agent.
 
 ### Prerequisites
 - Python 3.11+
-- `google-agents-cli` installed
-- Authenticated GCP credentials (`gcloud auth application-default login`)
+- Free Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey)
 
 ### 1. Install Dependencies
 ```bash
-uv venv
-source .venv/bin/activate
-uv pip install -r requirements.txt
+python -m pip install -r requirements.txt
+python -m pip install google-adk a2ui-agent-sdk
 ```
 
-### 2. Run Agent Locally with ADK Web UI
+### 2. Configure Environment (100% Free Mode)
+Create a `.env` file in the project root:
 ```bash
-export GOOGLE_MAPS_API_KEY="<YOUR_GOOGLE_MAPS_API_KEY>"
-adk web --port 8000 app
+GEMINI_API_KEY="your-free-gemini-api-key"
+MODEL="gemini-2.5-flash"
+```
+*(No GCP project, no credit card, and no cloud billing needed! The app automatically uses local SQLite and free OpenStreetMap Nominatim for geocoding and nearby places).*
+
+### 3. Seed Candidate Database (Optional)
+The local SQLite database (`data/nannies.db`) is automatically initialized and seeded on first run, or you can re-seed anytime with:
+```bash
+python seed_local.py
 ```
 
-### 3. Run FastAPI Proxy Frontend Locally
+### 4. Run the Web Application Locally
+
+#### Option A: Run Full Branded Chat UI (FastAPI)
 ```bash
-cd frontend
-export AGENT_ENGINE_RESOURCE_NAME="projects/<PROJECT_ID>/locations/<REGION>/reasoningEngines/<REASONING_ENGINE_ID>"
-export AGENT_DIRECTORY="app"
-uvicorn main:app --host 0.0.0.0 --port 8080
+python -m frontend.main
 ```
+Open **[http://localhost:8080](http://localhost:8080)** in your browser.
+
+#### Option B: Run with Official ADK Web UI
+```bash
+python -m google.adk.cli web --port 8000 app
+```
+Open **[http://localhost:8000](http://localhost:8000)** in your browser.
 
 ---
 
-## ☁️ Deployment Instructions
+## ☁️ Deployment Instructions (Optional Google Cloud Vertex AI)
+
+If you decide to deploy to Google Cloud:
 
 ### Deploy Agent to Vertex AI Agent Runtime
 ```bash
@@ -112,3 +126,4 @@ gcloud run deploy nanny-match-ai-frontend \
   --set-env-vars AGENT_ENGINE_RESOURCE_NAME="projects/<PROJECT_ID>/locations/us-east1/reasoningEngines/<REASONING_ENGINE_ID>",AGENT_DIRECTORY="app" \
   --project <PROJECT_ID>
 ```
+
