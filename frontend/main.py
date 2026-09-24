@@ -23,6 +23,7 @@ else:
     load_dotenv(override=True)
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -37,6 +38,15 @@ _A2UI_MIME = "application/json+a2ui"
 _TAG_RE = re.compile(r"</?a2a_datapart_json>")
 
 app = FastAPI(title="NannyMatch AI")
+
+# Allow CORS for mobile app and Vite dev server
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Check if we are running with a remote Reasoning Engine or local in-process agent
 AGENT_ENGINE_RESOURCE_NAME = os.environ.get("AGENT_ENGINE_RESOURCE_NAME", "").strip()
