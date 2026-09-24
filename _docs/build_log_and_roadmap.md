@@ -37,3 +37,4 @@
   6. Updated `.gitignore`, `.env.example`, and `README.md`.
   7. Verified end-to-end chat turn with Gemini 3.5 Flash (`gemini-3.5-flash`), local SQLite database querying, and A2UI card generation.
   8. Verified FastAPI local server running on port 8080 with active mode `local_free_mode`.
+  9. Added automatic `.env` discovery to `app/agent.py` and `frontend/main.py` and bound pre-authenticated `genai.Client` directly to `Gemini(client=...)`. Verified via live HTTP `/chat` requests.
