@@ -40,3 +40,5 @@
   9. Added automatic `.env` discovery to `app/agent.py` and `frontend/main.py` and bound pre-authenticated `genai.Client` directly to `Gemini(client=...)`. Verified via live HTTP `/chat` requests.
   10. Decoupled `PreloadMemoryTool` and `generate_memories_callback` in local mode. (Eliminated a 50+ second network timeout caused by attempting to reach non-existent Vertex AI Memory Bank endpoints; requests now respond in ~7s).
   11. Switched active model to `gemini-3.5-flash-lite` in `.env` to resolve free tier rate limits (limit: 20 RPD on 3.5-flash). Greetings now return in 2.8s and database queries in ~7s with full quota availability.
+  12. Enabled CORS (`CORSMiddleware`) in `frontend/main.py` allowing cross-origin requests from the NannyNest mobile application (`http://localhost:5173`, `http://localhost:5174`, `http://localhost:5175`).
+  13. Integrated NannyNest mobile app (`C:\AI\Repositories\mobile-apps\nannynest`) with Assistant tab connecting to local port 8080 and 1-click dummy authentication for offline testing.
