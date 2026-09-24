@@ -39,3 +39,4 @@
   8. Verified FastAPI local server running on port 8080 with active mode `local_free_mode`.
   9. Added automatic `.env` discovery to `app/agent.py` and `frontend/main.py` and bound pre-authenticated `genai.Client` directly to `Gemini(client=...)`. Verified via live HTTP `/chat` requests.
   10. Decoupled `PreloadMemoryTool` and `generate_memories_callback` in local mode. (Eliminated a 50+ second network timeout caused by attempting to reach non-existent Vertex AI Memory Bank endpoints; requests now respond in ~7s).
+  11. Switched active model to `gemini-3.5-flash-lite` in `.env` to resolve free tier rate limits (limit: 20 RPD on 3.5-flash). Greetings now return in 2.8s and database queries in ~7s with full quota availability.
