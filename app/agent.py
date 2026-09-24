@@ -21,6 +21,15 @@ import urllib.parse
 import urllib.request
 from zoneinfo import ZoneInfo
 
+from dotenv import load_dotenv
+
+# Automatically load .env from project root
+_dotenv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+if os.path.exists(_dotenv_path):
+    load_dotenv(_dotenv_path, override=True)
+else:
+    load_dotenv(override=True)
+
 from a2ui.basic_catalog.provider import BasicCatalog
 from a2ui.schema.manager import A2uiSchemaManager
 from google import genai
@@ -612,10 +621,17 @@ if REASONING_ENGINE_RESOURCE_NAME:
     except Exception:
         code_executor = None
 
+# Explicitly initialize Gemini client when GEMINI_API_KEY is available
+gemini_api_key = os.getenv("GEMINI_API_KEY")
+gemini_client = None
+if gemini_api_key and os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "false").lower() != "true":
+    gemini_client = genai.Client(api_key=gemini_api_key)
+
 root_agent = Agent(
     name="nanny_match_ai",
     model=Gemini(
         model=MODEL,
+        client=gemini_client,
         retry_options=types.HttpRetryOptions(attempts=3),
     ),
     code_executor=code_executor,
