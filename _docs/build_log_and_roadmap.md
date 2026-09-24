@@ -38,3 +38,4 @@
   7. Verified end-to-end chat turn with Gemini 3.5 Flash (`gemini-3.5-flash`), local SQLite database querying, and A2UI card generation.
   8. Verified FastAPI local server running on port 8080 with active mode `local_free_mode`.
   9. Added automatic `.env` discovery to `app/agent.py` and `frontend/main.py` and bound pre-authenticated `genai.Client` directly to `Gemini(client=...)`. Verified via live HTTP `/chat` requests.
+  10. Decoupled `PreloadMemoryTool` and `generate_memories_callback` in local mode. (Eliminated a 50+ second network timeout caused by attempting to reach non-existent Vertex AI Memory Bank endpoints; requests now respond in ~7s).

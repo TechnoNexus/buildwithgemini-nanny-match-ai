@@ -627,6 +627,28 @@ gemini_client = None
 if gemini_api_key and os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "false").lower() != "true":
     gemini_client = genai.Client(api_key=gemini_api_key)
 
+tools_list = [
+    search_nannies_firestore,
+    add_nanny_firestore,
+    calculate_payroll_and_taxes,
+    lookup_zip_code_location,
+    geocode_address,
+    find_nearby_places,
+    generate_nanny_illustration,
+    generate_nanny_video,
+    add_to_watchlist,
+    view_watchlist,
+    save_family_profile,
+    get_my_profile,
+    schedule_interview,
+]
+
+# Only attach Vertex AI Memory Bank tools and callbacks if explicitly deployed on Vertex AI
+after_agent_callback = None
+if os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "false").lower() == "true" and HAS_GCP:
+    tools_list.insert(0, PreloadMemoryTool())
+    after_agent_callback = generate_memories_callback
+
 root_agent = Agent(
     name="nanny_match_ai",
     model=Gemini(
@@ -636,23 +658,8 @@ root_agent = Agent(
     ),
     code_executor=code_executor,
     instruction=instruction,
-    tools=[
-        PreloadMemoryTool(),
-        search_nannies_firestore,
-        add_nanny_firestore,
-        calculate_payroll_and_taxes,
-        lookup_zip_code_location,
-        geocode_address,
-        find_nearby_places,
-        generate_nanny_illustration,
-        generate_nanny_video,
-        add_to_watchlist,
-        view_watchlist,
-        save_family_profile,
-        get_my_profile,
-        schedule_interview,
-    ],
-    after_agent_callback=generate_memories_callback,
+    tools=tools_list,
+    after_agent_callback=after_agent_callback,
     after_model_callback=a2ui_callback,
 )
 
