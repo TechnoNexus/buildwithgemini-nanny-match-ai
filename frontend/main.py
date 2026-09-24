@@ -93,7 +93,7 @@ async def chat_local(message: str, user_id: str) -> List[Dict[str, Any]]:
     # Retrieve or create session for user
     session_id = _user_sessions.get(user_id)
     if not session_id:
-        session = await runner.session_service.create_session(app_name="app", user_id=user_id)
+        session = await runner.session_service.create_session(app_name=runner.app_name, user_id=user_id)
         session_id = session.id
         _user_sessions[user_id] = session_id
 

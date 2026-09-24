@@ -35,3 +35,5 @@
   4. Updated `frontend/static/index.html` to support local `/static/generated/` URLs in A2UI Image components.
   5. Created `seed_local.py` for reproducible local database seeding.
   6. Updated `.gitignore`, `.env.example`, and `README.md`.
+  7. Verified end-to-end chat turn with Gemini 3.5 Flash (`gemini-3.5-flash`), local SQLite database querying, and A2UI card generation.
+  8. Verified FastAPI local server running on port 8080 with active mode `local_free_mode`.
